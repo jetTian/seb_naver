@@ -1,6 +1,8 @@
 # seb_naver
 SEB-Naver: A SE(2)-based Local Navigation Framework for Car-like Robots on Uneven Terrain 
+
 Paper: https://arxiv.org/abs/2503.02412
+
 Video: https://www.bilibili.com/video/BV1yBRpYmEmX/
 
 ## Dependence 
