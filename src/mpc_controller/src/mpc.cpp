@@ -110,7 +110,16 @@ void MPC::rcvOdomCallBack(nav_msgs::OdometryPtr msg)
     now_state.y = msg->pose.pose.position.y;
     now_state.theta = 2.0 * atan2(msg->pose.pose.orientation.z, msg->pose.pose.orientation.w);
 }
-void MPC::cmdCallback(const ros::TimerEvent &e)
+
+/*
+  定时回调
+  获取当前状态和参考轨迹
+  执行控制器逻辑(调用getCmd()进行MPC求解)
+  发布控制指令和可视化信息
+  统计和输出控制误差
+
+*/
+void MPC::cmdCallback(const ros::TimerEvent &e) //定时回调
 {
     drawFollowPath();
 
