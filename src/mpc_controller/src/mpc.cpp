@@ -31,8 +31,8 @@ void MPC::init(ros::NodeHandle &nh)
 
     u_0.resize(2, 1);
     u_0 = {0, 0};
-    X_sol = repmat(x_0, 1, Npre);
-    U_sol = repmat(u_0, 1, Npre);
+    X_sol = repmat(x_0, 1, Npre);  //求解器的状态X 初始设置为0，repmat(A, M, N) 大小为size(A,1)*M, size(A,2)*N，这里为3行,1*Npre列
+    U_sol = repmat(u_0, 1, Npre);  //求解器的控制U 初始设置为0，这里为2行,1*Npre列
 
     nh.param("mpc/bk_mode", bk_mode, false);
     nh.param<string>("mpc/traj_file", traj_file, "xxx");
@@ -117,65 +117,71 @@ void MPC::rcvOdomCallBack(nav_msgs::OdometryPtr msg)
   执行控制器逻辑(调用getCmd()进行MPC求解)
   发布控制指令和可视化信息
   统计和输出控制误差
-
 */
-void MPC::cmdCallback(const ros::TimerEvent &e) //定时回调
+void MPC::cmdCallback(const ros::TimerEvent &e)
 {
-    drawFollowPath();
+    drawFollowPath();  //可视化当前路径
 
-    if (!has_odom || !receive_traj){
+    if (!has_odom || !receive_traj){  //如果没有接收到里程计或轨迹，直接返回，不做任何控制操作
         return;
     }
     ros::Time begin = ros::Time::now();
-    if(begin > new_traj_analyzer.start_time){
+    if(begin > new_traj_analyzer.start_time){  //判断是否要用新的轨迹分析器
         traj_analyzer = new_traj_analyzer;
     }
-    xref = traj_analyzer.getRefPoints(Npre, dt);
+    xref = traj_analyzer.getRefPoints(Npre, dt);  //获取参考轨迹点
     if (!xref.empty())
     {
         TrajPoint p_now = traj_analyzer.getRefPoint();
-        Eigen::Vector2d err_vec(p_now.x - now_state.x, p_now.y - now_state.y);
+        Eigen::Vector2d err_vec(p_now.x - now_state.x, p_now.y - now_state.y);  //计算当前参考点与实际位置之间的误差
         std_msgs::Float64 err_msg;
         if(err_vec.norm()<1.0&&err_vec.norm()>0.001){
             errs.push_back(err_vec.norm());
             err_msg.data = errs.back();
-            err_pub.publish(err_msg);
+            err_pub.publish(err_msg);  //发布误差信息（用于监控或调试）
         }
-        {
+        {  //计算当前位置与参考轨迹点之间的跟踪误差与偏航角误差，并将其封装到消息中发布出去，以便用于监控、调试或上层控制模块使用
             TrajPoint tp = traj_analyzer.getRefPoint();
             mpc_controller::desiredState ds;
             ds.px = tp.x;
             ds.py = tp.y;
             ds.yaw = tp.theta;
             ds.stamp = ros::Time::now();
-            Eigen::Vector2d err_vec(tp.x - now_state.x, tp.y - now_state.y);
+            Eigen::Vector2d err_vec(tp.x - now_state.x, tp.y - now_state.y);  //计算当前位置与期望位置的平面距离即L2的误差
             ds.tkerror = err_vec.norm();
-            double err_yaw = tp.theta - now_state.theta;
-            if(ds.tkerror > 1.0){
+            double err_yaw = tp.theta - now_state.theta;  // 航向角的误差
+            if(ds.tkerror > 1.0){  //如果误差太大，说明离目标太远，忽略误差。可能是启动初期/漂移严重的保护
                 ds.tkerror = 0.0;
                 err_yaw = 0.0;
             }
             else{
-                while (err_yaw > M_PI)
+                while (err_yaw > M_PI)  //标准化到(-pi,pi)防止+-2pi的跳变
                     err_yaw -= 2.0 * M_PI;
                 while (err_yaw < -M_PI)
                     err_yaw += 2.0 * M_PI;
                 Eigen::Vector2d dir,n;
-                dir << cos(tp.theta), sin(tp.theta);
+                dir << cos(tp.theta), sin(tp.theta);  //表示参考点朝向的单位向量
                 n << -sin(tp.theta), cos(tp.theta);
             }
             ds.tkyaw = err_yaw;
             errs_yaw.push_back(ds.tkyaw);
-            desiredS_pub_.publish(ds);
+            desiredS_pub_.publish(ds); //包含了期望状态以及L2距离误差+yaw误差
         }
     }
     //publish desired state
+    
+    /*
+    如果到达目标点
+    设置速度和转角速度为0
+    打印或保存误差统计信息（最大误差、平均误差等）
+    重置状态变量，如误差容器等
+    */
     if (traj_analyzer.at_goal)
     {
         cmd.velocity = 0.0;
         cmd.angle_velocity = 0.0;
 
-        if (bk_mode)
+        if (bk_mode)  //bk_mode 默认为false 用于在outfile中记录误差数据
         {
             Eigen::Vector3d initp = Eigen::Vector3d::Zero();
             double mean_err = std::accumulate(errs.begin(), errs.end(), 0.0) / (1.0 * errs.size());
@@ -233,23 +239,23 @@ void MPC::cmdCallback(const ros::TimerEvent &e) //定时回调
             has_output = true;
         }
     }
-    else
+    else  //未到达目标，执行控制计算
     {
         smooth_yaw(xref);
         ros::Time t1 = ros::Time::now();
-        getCmd();
+        getCmd();  //进行优化计算，得到控制指令
         ros::Time t2 = ros::Time::now();
         vels.push_back(cmd.velocity);
         angle_vels.push_back(fabs(cmd.angle_velocity));
     }
-    pos_cmd_pub_.publish(cmd);
+    pos_cmd_pub_.publish(cmd);  //发布控制指令
 }
 
 void MPC::getCmd(void)
 {
-    nlp = casadi::Opti();
-    casadi::Dict options;
-    casadi::Dict qp_options;
+    nlp = casadi::Opti();  //定义优化器对象，即CasADi优化问题的接口为Opti
+    casadi::Dict options;  //设置优化器参数，如关闭打印信息、设置为稀疏矩阵等
+    casadi::Dict qp_options;  //设置优化器参数
     options["print_status"] = false;
     options["print_time"] = false;
     options["print_header"] = false;
@@ -260,15 +266,16 @@ void MPC::getCmd(void)
     qp_options["sparse"] = true;
     qp_options["error_on_fail"] = false;
     options["qpsol_options"] = qp_options;
-        
-    X = nlp.variable(3, Npre);
-    U = nlp.variable(2, Npre);
-    J = 0;
-    MX X_0 = nlp.parameter(3, 1);
-    MX x_next;
-    Slice all;
+
+    //设置决策变量
+    X = nlp.variable(3, Npre);  //状态: x y theta  
+    U = nlp.variable(2, Npre);  //控制 v + steer angle
+    J = 0;                      //代价函数初始化
+    MX X_0 = nlp.parameter(3, 1);  //初始状态参数
+    MX x_next; 
+    Slice all;  //？
     
-    for (int i = 0; i < Npre; i++)
+    for (int i = 0; i < Npre; i++)  //构建代价函数与约束，Npre为预测步长
     {
         MX ref_x = xref[i].x;
         MX ref_y = xref[i].y;
@@ -278,44 +285,47 @@ void MPC::getCmd(void)
         MX ref_steer = 0;
         MX ref_u = vertcat(ref_v, ref_steer);
 
+        //对于每一个预测步
+        //状态转移约束,保证状态满足动态模型
         if (i==0)
             x_next = stateTrans(X_0, U(all, i));
         else
             x_next = stateTrans(X(all, i-1), U(all, i));
         nlp.subject_to(X(all, i) == x_next);
+        //输入约束
         nlp.subject_to(U_min <= U(all, i) <= U_max);
         
         MX delta_x = ref_state - X(all, i);
-        MX delta_u = ref_u - U(all, i);
+        MX delta_u = ref_u - U(all, i); //实际上就是u, 因为ref_u都是0
         
         MX du;
         if (i > 0)
             du = U(all, i) - U(all, i - 1);
         else
             du = U(all, i) - u_0;
-
-        J = J + mtimes(delta_x.T(), mtimes(Q, delta_x));
+        //目标函数 = Q * delta_x*T（跟踪误差） + R * delta_u_*T （控制量大小） + Rd * du*T（控制量变化，平滑性）
+        J = J + mtimes(delta_x.T(), mtimes(Q, delta_x));  //？mtimes是什么？
         J = J + mtimes(delta_u.T(), mtimes(R, delta_u));
         J = J + mtimes(du.T(), mtimes(Rd, du));
     }
-    x_0 = {now_state.x, now_state.y, now_state.theta};
+    x_0 = {now_state.x, now_state.y, now_state.theta};  //设置初始状态与初值
     nlp.set_value(X_0, x_0);
     nlp.set_initial(X, X_sol);
     nlp.set_initial(U, U_sol);
-    nlp.solver("sqpmethod", options);
+ 
+    nlp.solver("sqpmethod", options);  //设置求解器
     nlp.minimize(J);
-
-
+ 
     try
     {
-        const casadi::OptiSol sol = nlp.solve();
+        const casadi::OptiSol sol = nlp.solve();  //求解
 
-        X_sol = sol.value(X);
-        U_sol = sol.value(U);
-        DM cmd_0 = U_sol(all, 0);
+        X_sol = sol.value(X);  //提取最优解的预测状态
+        U_sol = sol.value(U);  //提取最优解的控制
+        DM cmd_0 = U_sol(all, 0);  //提取当前最近的一次控制量
         u_0 = cmd_0;
-        cmd.velocity = (double)cmd_0(0, 0);
-        cmd.angle_velocity = (double)cmd_0(1, 0);
+        cmd.velocity = (double)cmd_0(0, 0);  //控制指令 速度
+        cmd.angle_velocity = (double)cmd_0(1, 0);  //控制指令 角速度(rad/s), 但实际上是steer角度，前轮转角 steering angle（rad）
     }
     catch(const std::exception& e)
     {
@@ -326,10 +336,10 @@ void MPC::getCmd(void)
         // ROS_WARN("solver error, but we ignore.");
     }
     
-    drawRefPath();
-    drawPredictPath();
+    drawRefPath();  //可视化参考轨迹
+    drawPredictPath();  //可视化预测轨迹
 
-    if (delay_num>0)
+    if (delay_num>0)  //更新控制缓存
     {
         output_buff.erase(output_buff.begin());
         output_buff.push_back(Eigen::Vector2d(cmd.velocity, cmd.angle_velocity));
